@@ -1,3 +1,2 @@
-streamlit 
-asyncio
-websockets
+streamlit==1.38.0
+yfinance==0.2.41
