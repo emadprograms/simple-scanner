@@ -1,8 +1,7 @@
 import streamlit as st
 import asyncio
-import websockets
-import json
 import requests
+from pprint import pprint
 
 # Capital.com API endpoints
 session_api_url = "https://demo-api-capital.backend-capital.com/api/v1/session"
@@ -41,54 +40,104 @@ def create_session(api_key, identifier, password):
         st.error(response.text)
         return None, None, None
 
-# Function to connect to the websocket and fetch instrument prices
-async def connect_to_websocket(cst_token, security_token):
-    url = "wss://api-streaming-capital.backend-capital.com/connect"
-    async with websockets.connect(url) as websocket:
-        # Example subscription message (you may need to adjust this based on the API documentation)
-        subscription_message = json.dumps({
-            "destination": "marketData.subscribe",
-            "correlationId": "1",
-            "cst": cst_token,
-            "securityToken": security_token,
-            "payload": {
-                "epics": ["GOOGL", "AAPL"]  # Replace with your desired instruments
-            }
-        })
-        await websocket.send(subscription_message)
+def get_filtered_symbols(cst_token, security_token):
+    """Retrieves and filters market symbols based on specified criteria.
 
-        # Create placeholders for the data
-        googl_placeholder = st.empty()
-        aapl_placeholder = st.empty()
+    Args:
+        cst_token: The CST token for authentication.
+        security_token: The security token for authentication.
 
-        while True:
-            response = await websocket.recv()
-            data = json.loads(response)
-            st.write(data)  # For debugging purposes, print the full response
+    Returns:
+        A list of filtered symbols that meet the criteria.
+    """
+    node_ids = [
+        "hierarchy_v1.shares.us.most_traded",
+        "hierarchy_v1.shares.us.top_gainers",
+        "hierarchy_v1.shares.us.top_losers",
+        "hierarchy_v1.shares.us.most_volatile"
+    ]
+    # Define the headers with the tokens for authentication
+    headers = {
+        'X-SECURITY-TOKEN': security_token,
+        'CST': cst_token
+    }
 
-            # Extract and display the prices for GOOGL and AAPL
-            if data.get("destination") == "quote":
-                epic = data["payload"]["epic"]
-                bid = data["payload"]["bid"]
-                ofr = data["payload"]["ofr"]
-                if epic == "GOOGL":
-                    googl_placeholder.write(f"GOOGL - Bid: {bid}, Offer: {ofr}")
-                elif epic == "AAPL":
-                    aapl_placeholder.write(f"AAPL - Bid: {bid}, Offer: {ofr}")
+    filtered_symbols = []  # Store symbols that meet the criteria
+
+    for node_id in node_ids:
+        url = f"https://api-capital.backend-capital.com/api/v1/marketnavigation/{node_id}"
+
+        # Make the API request
+        response = requests.get(url, headers=headers)
+
+        if response.status_code == 200:
+            market_navigation_data = response.json()  # Parse the JSON response
+            pprint(market_navigation_data)
+
+            # Iterate through markets and extract relevant data
+            for market in market_navigation_data.get('markets', []):
+                symbol = market.get('epic')
+                bid = market.get('bid')
+                offer = market.get('offer')
+
+                # Check if the market meets the filtering criteria
+                if bid is not None and offer is not None and offer - bid < 0.2 and bid > 80:
+                    filtered_symbols.append((symbol, round(offer - bid, 2)))
+
+        else:  # Handle cases where the request was not successful
+            print(f"Request failed with status code: {response.status_code}")
+            print(response.text)  # Print the error response for debugging
+
+    return filtered_symbols
+
+def fetch_historical_prices(cst_token, security_token, epic, resolution='D', max_results=14):
+    """Fetches historical prices for the given epic."""
+    headers = {
+        'X-CAP-API-KEY': st.secrets["capitalcom"]["api_key"],
+        'CST': cst_token,
+        'X-SECURITY-TOKEN': security_token
+    }
+    url = f"https://demo-api-capital.backend-capital.com/api/v1/prices/{epic}?resolution={resolution}&max={max_results}"
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()['prices']
+    else:
+        st.error(f"Failed to fetch historical prices for {epic}. Status code: {response.status_code}")
+        st.error(response.text)
+        return None
+
+def calculate_atr(prices):
+    """Calculates the Average True Range (ATR) from historical prices."""
+    tr_values = []
+    for i in range(1, len(prices)):
+        high = prices[i]['highPrice']['bid']
+        low = prices[i]['lowPrice']['bid']
+        prev_close = prices[i-1]['closePrice']['bid']
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_values.append(tr)
+    atr = sum(tr_values) / len(tr_values)
+    return atr
 
 # Streamlit app
-st.title("Capital.com WebSocket Stream")
+st.title("Capital.com REST API Stream")
 
 # Load secrets from st.secrets
 api_key = st.secrets["capitalcom"]["api_key"]
 identifier = st.secrets["capitalcom"]["identifier"]
 password = st.secrets["capitalcom"]["password"]
 
-# Button to start WebSocket connection
-if st.button("Connect to WebSocket"):
+# Button to start fetching prices
+if st.button("Fetch Prices"):
     balance, cst_token, security_token = create_session(api_key, identifier, password)
     if cst_token and security_token:
         st.write(f"Balance: {balance}")
         st.write(f"CST Token: {cst_token}")
         st.write(f"Security Token: {security_token}")
-        asyncio.run(connect_to_websocket(cst_token, security_token))
+        filtered_symbols = get_filtered_symbols(cst_token, security_token)
+        st.write("Filtered Symbols:")
+        for symbol, spread in filtered_symbols:
+            st.write(f"Symbol: {symbol}, Spread: {spread}")
+            prices = fetch_historical_prices(cst_token, security_token, symbol)
+            if prices:
+                atr = calculate_atr(prices)
+                st.write(f"Symbol: {symbol}, ATR: {atr}")
